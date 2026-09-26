@@ -1,0 +1,27 @@
+# Web 框架
+fastapi==0.115.13
+uvicorn==0.34.0
+starlette==0.46.2
+python-multipart==0.0.32      # FastAPI 的 File()/UploadFile 必需（无 import，靠运行时校验）
+
+# 数据校验
+pydantic==2.13.5
+pydantic-settings==2.7.1
+
+# 数据库
+sqlalchemy==2.0.41
+pymysql==1.1.1
+
+# 鉴权
+bcrypt==5.0.0
+PyJWT==2.13.0
+
+# LLM / Agent
+langgraph==1.2.11
+langchain-core==1.6.3
+langchain-openai==1.6.2
+openai==3.14.1
+
+# 向量库 / 知识库
+chromadb==1.5.9
+sentence-transformers==6.0.1 
