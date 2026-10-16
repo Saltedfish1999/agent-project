@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.common.response import Response
+from app.config import MODEL_REGISTRY
 from app.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
@@ -38,7 +39,7 @@ async def chat_stream(data:ChatRequest,current_user:User=Depends(get_current_use
         }
     )
 
-@router.get("/converstaions")
+@router.get("/conversations")
 def list_conversations(    
     page:int=1,
     page_size:int=10,
@@ -67,3 +68,12 @@ async def delete_conversation(
     conversation_service.delete_conversation(db,current_user,thread_id)
     await agent_service.delete_thread(thread_id)
     return Response.success()
+
+@router.get("/models")
+def list_models():
+    """可选模型列表"""
+    return Response.success(data=[
+        {"id": k, "label": v["label"]}
+        for k, v in MODEL_REGISTRY.items()
+        if v.get("supports_tools")   
+    ])

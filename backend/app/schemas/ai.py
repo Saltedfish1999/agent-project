@@ -7,3 +7,5 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages:list[ChatMessage]
     thread_id:str | None = None
+    model:str|None = None
+    enable_web:bool=False

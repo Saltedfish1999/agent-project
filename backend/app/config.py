@@ -11,12 +11,34 @@ class Setting(BaseSettings):
     LLM_API_KEY:str
     LLM_BASE_URL:str
     LLM_MODEL:str
+    GLM_API_KEY:str=""
+    GLM_MODEL:str=""
+    GLM_BASE_URL:str=""
+    TAVILY_API_KEY: str = ""
+
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env", env_file_encoding="utf-8"
     )
 
 setting = Setting()
+
+MODEL_REGISTRY = {
+    "deepseek-flash": {
+        "label": "DeepSeek Flash",
+        "model": "deepseek-flash",
+        "base_url": "https://api.deepseek.com",
+        "api_key": setting.LLM_API_KEY,
+        "supports_tools": True,
+    },
+    "glm-5.3-flash": {
+        "label": "GLM 5.3 Flash",
+        "model": "glm-5.3-flash",          # 字符串要和官方文档一致
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key": setting.GLM_API_KEY,
+        "supports_tools": True,
+    },
+}
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 UPLOAD_DIR = BASE_DIR / "uploads"

@@ -14,9 +14,13 @@ from app.models.user import User
 from app.schemas.ai import ChatRequest
 from app.service import agent_tools, conversation_service
 from app.config import setting
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from app.config import BASE_DIR,MODEL_REGISTRY,setting
 
 
-_checkpointer = InMemorySaver()
+CHECKPOINT_PATH = BASE_DIR / "data" / "checkpoints.sqlite"
+_checkpointer: AsyncSqliteSaver | None = None
 SYSTEM_PROMPT = """你是智能实验室预约系统的 Agent，回答要简洁。
 你可以：
 1. 使用 search_lab_docs 查询实验室的规则、安全、开放时间等问题
@@ -46,12 +50,15 @@ TOOL_LABELS = {
     "get_today": "获取今天日期",
 }
 
-def build_agent(db:Session,current_user:User):
-    tools = agent_tools.build_tools(db,current_user)
+def build_agent(db:Session,current_user:User,model_id:str | None = None,enable_web:bool=False):
+    if _checkpointer is None:
+        raise BusinessException(message="检查点未初始化，请重启服务")
+    tools = agent_tools.build_tools(db,current_user,enable_web)
+    cfg = _resolve_model(model_id)
     llm = ChatOpenAI(
-        api_key=setting.LLM_API_KEY,
-        base_url=setting.LLM_BASE_URL,
-        model=setting.LLM_MODEL,
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+        model=cfg["model"],
         temperature=0,
         streaming=True
     ).bind_tools(tools)
@@ -76,6 +83,7 @@ def run_agent(db:Session,current_user:User,data:ChatRequest):
     if not data.messages:
         raise BusinessException(message="对话内容为空")
 
+    # 挑出最后一条用户信息作为提问
     question = next(
         (m.content.strip() for m in reversed(data.messages or [])
         if m.role == "user" and m.content.strip()),
@@ -85,8 +93,9 @@ def run_agent(db:Session,current_user:User,data:ChatRequest):
     if not question:
         raise BusinessException(message="请输入您要对话的内容")
 
+    # 获取当前对话的线程id
     thread_id = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
-    agent = build_agent(db,current_user)
+    agent = build_agent(db,current_user,data.model,data.enable_web)
 
     try:
         result = agent.invoke(
@@ -169,7 +178,7 @@ async def stream_agent(db:Session,current_user:User,data:ChatRequest) -> AsyncIt
         thread_id = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
 
         inputs = {"messages":[SystemMessage(content = SYSTEM_PROMPT,id="system"),HumanMessage(content=question)]}
-        agent = build_agent(db,current_user)
+        agent = build_agent(db,current_user,data.model,data.enable_web)
 
         yield{"type":"status","message":"正在思考..."}
 
@@ -222,7 +231,7 @@ async def load_messages(thread_id:str) -> list:
 
 def to_chat_messages(messages:list) -> list:
     """过滤成展示文本"""
-    out = {}
+    out = []
     for m in messages:
         if not isinstance(m,(HumanMessage,AIMessage)):
             continue
@@ -239,3 +248,35 @@ def to_chat_messages(messages:list) -> list:
 async def delete_thread(thread_id:str) -> None:
     """删除对话状态"""
     await _checkpointer.adelete_thread(thread_id)
+
+async def init_checkpointer() -> None:
+    """启动调用一次，建立持久化检查点"""
+    global _checkpointer
+    if _checkpointer is not None:
+        return 
+    conn  = await aiosqlite.connect(str(CHECKPOINT_PATH))
+    saver = AsyncSqliteSaver(conn)
+    await saver.setup()
+    _checkpointer = saver
+
+async def close_checkpointer() -> None:
+    """关闭时释放连接"""
+    global _checkpointer
+    if _checkpointer is not None:
+        await _checkpointer.conn.close()
+        _checkpointer = None
+
+def _resolve_model(model_id:str | None) -> dict:
+    """前端传来的模型id解析成实际连接参数"""
+    if not model_id:
+        return {
+            "model": setting.LLM_MODEL,
+            "base_url": setting.LLM_BASE_URL,
+            "api_key": setting.LLM_API_KEY,
+        }
+    cfg = MODEL_REGISTRY.get(model_id)
+    if not cfg:
+        raise BusinessException(message=f"不支持的模型：{model_id}")
+    if not cfg["api_key"]:
+        raise BusinessException(message=f"模型「{cfg['label']}」未配置 API Key")
+    return cfg

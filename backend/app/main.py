@@ -18,6 +18,7 @@ from app.api.reservation import router as reservation_router
 from app.api.ai import router as ai_router
 from app.models.reservation import Reservation
 from starlette.middleware.cors import CORSMiddleware
+from app.service import kb_service, reservation_service, agent_service
 from app.common.exceptions import (
     BusinessException,
     business_exception_handler,
@@ -37,11 +38,19 @@ origins = [
 Base.metadata.create_all(bind=engine)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        await asyncio.to_thread(kb_service.warmup)
+    except Exception:
+        logger.exception("向量库预热失败，服务继续启动")
+    await agent_service.init_checkpointer()
     task = asyncio.create_task(
         reservation_service.run_expire_scan()
     )  # 启动项目开启异步的扫描任务
-    yield
-    task.cancel()  # 关闭项目同时取消异步任务
+    try:
+        yield
+    finally:
+        task.cancel()  # 关闭时取消后台任务
+        await agent_service.close_checkpointer()
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth_router)
@@ -69,17 +78,6 @@ app.add_middleware(
 	allow_headers=["*"],          # 允许所有请求头（包含Authorization）
 )
 
-@asynccontextmanager
-async def listspan(app:FastAPI):
-    # 预热向量库
-    try:
-        await asyncio.to_thread(kb_service.warmup) # 不会阻塞事件循环
-    except Exception:
-        logger.exception("向量库预热失败，服务继续启动")
-    # 启动项目开启的异步扫描任务
-    task = asyncio.create_task(reservation_service.run_expire_scan())
-    yield
-    task.cancel() # 关闭项目同时取消异步任务
 
 # 挂载静态资源：/uploads/xxx.jpg → uploads/xxx.jpg
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

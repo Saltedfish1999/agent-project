@@ -34,11 +34,13 @@ def get_collection() -> Collection:
         return _collection
     KB_DIR.mkdir(parents=True,exist_ok=True)
     CHROMA_DIR.mkdir(parents=True,exist_ok=True)
+    # 创建向量数据库的连接
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    # 连接到具体的表
     col = client.get_or_create_collection(
         name="lab_kb",embedding_function=get_embedding_fn()
     )
-
+    # 导入外部知识库，ids：文件名去拓展名 docs:文件全文 metas:文件出处
     if col.count() == 0:
         ids = []
         docs = []

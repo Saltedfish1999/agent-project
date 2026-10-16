@@ -10,6 +10,27 @@ export function chatApi(data) {
   })
 }
 
+export function getConversation(params) {
+  return request({
+    url: `/api/ai/conversations`,
+    method: 'get',
+    params
+  })
+}
+
+// 加载特定对话的历史信息
+export function getConversationMessages(threadId) {
+  return request({
+    url: `/api/ai/conversation/${threadId}/messages`,
+    method: 'get'
+  })
+}
+
+// 加载可选大模型
+export function getModelApi() {
+  return request({ url: '/api/ai/models', method: 'get' })
+}
+
 /**
  * SSE流式对话 onEvent没收到一条data则回馈一条
  */

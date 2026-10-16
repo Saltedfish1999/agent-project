@@ -35,3 +35,6 @@ uploads/
 # Logs
 *.log
 logs/
+
+# Local scratch / debug scripts
+test_interrupt.py
