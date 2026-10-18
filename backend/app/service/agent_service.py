@@ -11,7 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.common.exceptions import BusinessException
 from app.models.user import User
-from app.schemas.ai import ChatRequest
+from app.schemas.ai import ChatRequest, ContinueRequest, RegenerateRequest
 from app.service import agent_tools, conversation_service
 from app.config import setting
 import aiosqlite
@@ -40,6 +40,15 @@ SYSTEM_PROMPT = """你是智能实验室预约系统的 Agent，回答要简洁�
 不要瞎编数据库里没有的实验室或者设备信息。
 如果是问开放时间或者实验室规则，优先调用 search_lab_docs，不要凭空回复。
 """
+
+CONTINUE_HINT = "请紧接着上面那条没写完的回答继续输出，不要重复已经写过的内容，不要重新开头。"
+
+
+REGENERATE_HINTS = [
+    "请重新回答上面这个问题，换一种表述，不要复述之前的答案，也不要复述问题。",
+    "请重新回答上面这个问题，换一个角度组织答案，给出之前没提到的要点。",
+    "请重新回答上面这个问题，尽量更简洁，只保留结论和关键步骤。",
+]
 
 # 工具英文名 → 页面上给人看的中文过程文案
 TOOL_LABELS = {
@@ -220,6 +229,90 @@ async def stream_agent(db:Session,current_user:User,data:ChatRequest) -> AsyncIt
     except Exception:
         traceback.print_exc()
         yield {"type": "error", "message": "大模型调用失败，请稍后重试"}
+
+async def continue_stream_agent(db,current_user,data:ContinueRequest) -> AsyncIterator:
+    """继续生成"""
+    thread_id = data.thread_id
+    config = {"configurable":{"thread_id":thread_id}}
+    messages = await load_messages(thread_id)
+
+    # 截至到最后一个用户提问为止
+    idx = next((i for i in range(len(messages)-1,-1,-1) if isinstance(messages[i],HumanMessage)),-1)
+    history = messages[:idx+1] if idx >= 0 else []
+    
+    cfg  = _resolve_model(data.model)
+    llm = ChatOpenAI(api_key=cfg["api_key"],base_url=cfg["base_url"],model=cfg["model"],temperature=0,streaming=True)
+
+    added = []
+    async for chunk in llm.astream([*history,AIMessage(content=data.content),HumanMessage(content=CONTINUE_HINT)]):
+        text = _chunk_text(chunk)
+        if text:
+            added.append(text)
+            yield {"type":"token","content":text}
+
+    merged = data.content + " ".join(added)
+    agent = build_agent(db,current_user,data.model)
+    await agent.aupdate_state(
+        config,
+        {"messages":[AIMessage(content=merged,id=f"ai-{thread_id}")]},
+        as_node="agent"
+    )
+    yield {"type":"done"}
+
+async def regenerate_stream_agent(db,current_user,data:RegenerateRequest) -> AsyncIterator:
+    """重新生成"""
+    thread_id = data.thread_id
+    config = {"configurable":{"thread_id":thread_id}}
+    try:
+        messages = await load_messages(thread_id)
+
+        # 获取最后一次用户提问
+        idx = next((i for i in range(len(messages) - 1,-1,-1)
+                    if isinstance(messages[i],HumanMessage)),-1)
+
+        if idx<0:
+            raise BusinessException(message="没有可以重新生成的提问")
+        # 获取最后一条完整的提问
+        answer = next((m for m in reversed(messages[idx+1:])
+                       if isinstance(m,AIMessage) and not getattr(m,"tool_calls",None)),None)
+
+        if answer is None:
+            raise BusinessException(message="这条提问没有回答")
+
+        # 只取到提问为止，不收取工具和旧回答
+        history = messages[:idx+1]
+
+        # 获取LLM类型
+        cfg = _resolve_model(data.model)
+        llm = ChatOpenAI(
+            api_key=cfg["api_key"],
+            base_url=cfg["base_url"],
+            model=cfg["model"],
+            temperature=0,
+            streaming=True,
+        )
+        hint = REGENERATE_HINTS[(data.attempt or 0) % len(REGENERATE_HINTS)]
+        yield{"type":"status","message":"正在重新生成"}
+
+        added = []
+        # 流式突出返回的内容
+        async for chunk in llm.astream([*history,HumanMessage(content=hint)]):
+            text = _chunk_text(chunk)
+            if text:
+                added.append(text)
+                yield {"type":"token","content":text}
+
+        # 原地覆盖同一个id
+        agent = build_agent(db,current_user,data.model)
+        # 改写检查点中的状态
+        await agent.aupdate_state(config,{"messages":[AIMessage(content="".join(added),id=answer.id)]},as_node="agent")
+        yield {"type":"done"}
+    except BusinessException as exc:
+        yield {"type": "error", "message": exc.message}
+    except Exception:
+        traceback.print_exc()
+        yield {"type": "error", "message": "重新生成失败，请稍后重试"}
+
 
 
 async def load_messages(thread_id:str) -> list:

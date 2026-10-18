@@ -34,17 +34,18 @@ export function getModelApi() {
 /**
  * SSE流式对话 onEvent没收到一条data则回馈一条
  */
-export async function chatStreamApi(data, onEvent) {
+async function readSSE(url, payload, onEvent, signal) {
   const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
   const token = getToken()
-  const res = await fetch(`${baseUrl}/api/ai/chat/stream`, {
+  const res = await fetch(`${baseUrl}${url}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
-    body: JSON.stringify(data)
+    body: JSON.stringify(payload),
+    signal
   })
 
   if (res.status === 401) {
@@ -57,39 +58,57 @@ export async function chatStreamApi(data, onEvent) {
   const contentType = res.headers.get('content-type') || ''
 
   if (!contentType.includes('text/event-stream')) {
-    const payload = await res.json().catch(() => null)
-    throw new Error(payload?.message || '流式接口返回异常')
+    const errorData = await res.json().catch(() => null)
+    throw new Error(errorData?.message || '流式接口返回异常')
   }
 
   // 按二进制块读响应体，不是全部下载完
   const reader = res.body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+      buffer += decoder.decode(value, { stream: true })
 
-    buffer += decoder.decode(value, { stream: true })
+      //SSE帧之间用空行隔开
+      const chunks = buffer.split('\n\n') || ''
 
-    //SSE帧之间用空行隔开
-    const chunks = buffer.split('\n\n') || ''
+      buffer = chunks.pop() || ''
 
-    buffer = chunks.pop() || ''
+      for (const chunk of chunks) {
+        const line = chunk
+          .split('\n')
+          .map((item) => item.trim())
+          .find((item) => item.startsWith('data:'))
+        if (!line) continue
 
-    for (const chunk of chunks) {
-      const line = chunk
-        .split('\n')
-        .map((item) => item.trim())
-        .find((item) => item.startsWith('data:'))
-      if (!line) continue
-
-      // 去掉前缀'data'
-      const raw = line.slice(5).trim()
-      if (!raw || raw === '[DONE]') continue
-      try {
-        onEvent(JSON.parse(raw))
-      } catch {}
+        // 去掉前缀'data'
+        const raw = line.slice(5).trim()
+        if (!raw || raw === '[DONE]') continue
+        try {
+          onEvent(JSON.parse(raw))
+        } catch {}
+      }
     }
+  } finally {
+    reader.cancel().catch(() => {})
   }
+}
+
+// 首次提问
+export async function chatStreamApi(data, onEvent, signal) {
+  return readSSE('/api/ai/chat/stream', data, onEvent, signal)
+}
+
+// 继续生成
+export function continueChatApi(data, onEvent, signal) {
+  return readSSE('/api/ai/chat/continue', data, onEvent, signal)
+}
+
+// 重新生成
+export function regenerateChatApi(data, onEvent, signal) {
+  return readSSE('/api/ai/chat/regenerate', data, onEvent, signal)
 }

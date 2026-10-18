@@ -8,7 +8,7 @@ from app.config import MODEL_REGISTRY
 from app.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
-from app.schemas.ai import ChatMessage, ChatRequest
+from app.schemas.ai import ChatMessage, ChatRequest, ContinueRequest, RegenerateRequest
 from app.service import agent_service, ai_service, conversation_service
 
 router = APIRouter(prefix="/api/ai",tags=["agent"])
@@ -77,3 +77,27 @@ def list_models():
         for k, v in MODEL_REGISTRY.items()
         if v.get("supports_tools")   
     ])
+
+@router.post("/chat/continue")
+async def chat_continue(data:ContinueRequest,current_user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    async def event_gen():
+        async for event in agent_service.continue_stream_agent(db,current_user,data):
+            yield _sse_line(event)
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
+
+@router.post("/chat/regenerate")
+async def chat_regenerate(data:RegenerateRequest,current_user:User=Depends(get_current_user),db:Session = Depends(get_db)):
+    conversation_service.assert_owner(db,current_user,data.thread_id)
+
+    async def event_gen():
+        async for event in agent_service.regenerate_stream_agent(db, current_user, data):
+            yield _sse_line(event)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache",
+                 "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )

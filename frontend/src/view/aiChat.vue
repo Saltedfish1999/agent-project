@@ -4,7 +4,10 @@
       <template #header>
         <div class="card-header" style="font-size: 16px; font-weight: bold">
           <span>AI智能助手</span>
-          <el-icon class="history-entry" @click="openHistory"><Clock /></el-icon>
+          <div class="card-right">
+            <el-icon class="history-entry" @click="addNewChat"><Plus /></el-icon>
+            <el-icon class="history-entry" @click="openHistory"><Clock /></el-icon>
+          </div>
         </div>
       </template>
 
@@ -52,6 +55,24 @@
               <div v-for="(step, i) in item.steps" :key="i">· {{ step }}</div>
             </div>
             <div v-html="parseMarkdown(item.content)"></div>
+            <div class="message-bottom">
+              <div
+                class="operate-message"
+                v-if="item.role === 'assistant' && index != 0 && !loading"
+              >
+                <el-tooltip content="复制" placement="top">
+                  <el-icon class="operate-icon" @click="handleCopy(item)"><CopyDocument /></el-icon>
+                </el-tooltip>
+                <el-tooltip v-if="index === messages.length - 1" content="重新生成" placement="top">
+                  <el-icon class="operate-icon" @click="handleRegenerate(item)"
+                    ><Refresh
+                  /></el-icon>
+                </el-tooltip>
+              </div>
+              <div v-if="isShowContinue(item, index)" class="continue-message">
+                <el-button size="small" text bg @click="handleContinue(item)">继续生成</el-button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -82,7 +103,8 @@
                 >联网搜索</el-button
               >
             </div>
-            <el-button type="primary" @click="handleSend" :loading="loading">发送</el-button>
+            <el-button v-if="loading" type="danger" @click="handleStop">停止生成</el-button>
+            <el-button v-else type="primary" @click="handleSend" :loading="loading">发送</el-button>
           </div>
         </div>
       </div>
@@ -109,20 +131,26 @@ import {
   chatStreamApi,
   getConversation,
   getConversationMessages,
-  getModelApi
+  getModelApi,
+  continueChatApi,
+  regenerateChatApi
 } from '@/api/ai'
-import { ref, reactive, nextTick, onMounted } from 'vue'
+import { ref, reactive, nextTick, onMounted, computed } from 'vue'
 import { marked } from 'marked'
 import { ElMessage } from 'element-plus'
 import DOMPurify from 'dompurify'
 
+defineOptions({ name: 'AiChat' })
 const WELCOME = {
   role: 'assistant',
   content:
     '你好，我是实验室预约助手。可以问规则和开放实验室，也可以说「帮我预约明天下午的实验室」，确认后我会帮你提交。'
 }
+const THREAD_KEY = 'ai-chat-thread-id'
+const savedThreadId = sessionStorage.getItem(THREAD_KEY)
+
 const messages = ref([{ ...WELCOME }])
-const threadId = ref(crypto.randomUUID())
+const threadId = ref(savedThreadId || crypto.randomUUID())
 const input = ref('')
 const loading = ref(false)
 const listRef = ref()
@@ -132,6 +160,11 @@ const historyLoading = ref(false)
 const models = ref([])
 const currentModel = ref('')
 const enable_web = ref(false)
+
+let stopController = null
+
+// 记录发送的信息
+const rememberThread = () => sessionStorage.setItem(THREAD_KEY, threadId.value)
 
 const scrollToBottom = () => {
   nextTick(() => {
@@ -144,9 +177,37 @@ const openHistory = () => {
   historyVisible.value = true
 }
 
+const restoreMessages = async () => {
+  if (!savedThreadId) return
+  try {
+    const res = await getConversationMessages(savedThreadId)
+    if (res.code === 200 && res.data?.length) {
+      messages.value = res.data.map((m) => ({
+        role: m.role,
+        content: m.content,
+        incomplete: !!m.incomplete,
+        steps: []
+      }))
+      scrollToBottom()
+    }
+  } catch {
+    sessionStorage.removeItem(THREAD_KEY)
+  }
+}
+
+// 打开新的对话输入框
+const addNewChat = () => {
+  if (loading.value) handleStop()
+  threadId.value = crypto.randomUUID()
+  sessionStorage.removeItem(THREAD_KEY)
+  messages.value = [{ ...WELCOME }]
+  input.value = ''
+}
+
+// 获取当前可用的大模型
 const getModels = async () => {
   const res = await getModelApi()
-  if ((res.code = 200)) {
+  if (res.code === 200) {
     models.value = res.data
     currentModel.value = res.data[0]?.id || ''
   }
@@ -156,6 +217,9 @@ const isWebSearch = () => {
   enable_web.value = !enable_web.value
 }
 
+const handleStop = () => stopController?.abort()
+
+// 获取对话历史
 const getConversations = async () => {
   historyLoading.value = true
   const res = await getConversation({ page: 1, page_size: 10 })
@@ -169,11 +233,60 @@ const getConversations = async () => {
   }
 }
 
+// 重新生成
+const handleContinue = async () => {
+  const last = messages.value[messages.value.length - 1] // 获取最后一句话
+  if (loading.value || !last || last.role !== 'assistant' || !last.incomplete) return
+
+  loading.value = true
+  stopController = new AbortController()
+  last.status = '继续生成中...'
+
+  try {
+    await continueChatApi(
+      { thread_id: threadId.value, content: last.content, model: currentModel.value },
+      (evt) => {
+        if (evt.type === 'token') last.content += evt.content || ''
+        else if (evt.type === 'done') last.incomplete = false
+        else if (evt.type === 'error') ElMessage.error(evt.message || '续写失败')
+        scrollToBottom()
+      },
+      stopController.signal
+    )
+  } catch (err) {
+    if (err?.name !== 'AbortError') ElMessage.error(err.message || '网络异常')
+  } finally {
+    stopController = null
+    last.status = ''
+    loading.value = false
+    scrollToBottom()
+  }
+}
+
+const isShowContinue = (item, index) => {
+  return (
+    item.role === 'assistant' &&
+    item.incomplete &&
+    !loading.value &&
+    index === messages.value.length - 1
+  )
+}
+
+const handleCopy = async (item) => {
+  try {
+    await navigator.clipboard.writeText(item.content)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.warning('复制失败')
+  }
+}
+
 const handleSend = async () => {
   const text = input.value.trim()
   if (!text || loading.value) return
 
   messages.value.push({ role: 'user', content: text })
+  rememberThread()
   input.value = ''
   loading.value = true
   scrollToBottom()
@@ -192,6 +305,7 @@ const handleSend = async () => {
     .map(({ role, content }) => ({ role, content }))
 
   try {
+    stopController = new AbortController()
     // 第二个参数是回调：每解析出一条 SSE 事件就进一次
     await chatStreamApi(
       {
@@ -222,20 +336,78 @@ const handleSend = async () => {
           if (!assistant.content) {
             assistant.content = evt.message || '请求失败'
           }
+
           ElMessage.error(evt.message || '请求失败')
         }
         scrollToBottom()
-      }
+      },
+      stopController.signal
     )
   } catch (err) {
     assistant.status = ''
-    if (!assistant.content) {
-      assistant.content = err.message || '网络异常'
+    if (err?.name === 'AbortError') {
+      assistant.incomplete = true
+      if (!assistant.content) assistant.content = '已停止生成'
+    } else {
+      if (!assistant.content) {
+        assistant.content = err.message || '网络异常'
+      }
+      ElMessage.error(err.message || '网络异常')
     }
-    ElMessage.error(err.message || '网络异常')
   } finally {
+    stopController = null
     loading.value = false
     assistant.status = ''
+    scrollToBottom()
+  }
+}
+const handleRegenerate = async (item) => {
+  if (loading.value || !item.content) return
+
+  const backup = item.content // 失败时恢复，别让用户什么都没有
+  item.content = ''
+  item.status = '正在重新生成...'
+  item.steps = []
+  item.incomplete = false
+  item.regenCount = (item.regenCount || 0) + 1
+
+  loading.value = true
+  stopController = new AbortController()
+
+  try {
+    await regenerateChatApi(
+      {
+        thread_id: threadId.value,
+        model: item.model || currentModel.value,
+        attempt: item.regenCount
+      },
+      (evt) => {
+        if (evt.type === 'status') {
+          item.status = evt.message || '正在重新生成...'
+        } else if (evt.type === 'token') {
+          item.content += evt.content || ''
+          item.status = ''
+        } else if (evt.type === 'done') {
+          item.status = ''
+        } else if (evt.type === 'error') {
+          item.status = ''
+          ElMessage.error(evt.message || '重新生成失败')
+        }
+        scrollToBottom()
+      },
+      stopController.signal
+    )
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      item.incomplete = !!item.content // 保留已生成的部分
+    } else {
+      item.content = backup // 把旧回答还回去
+      ElMessage.error(err.message || '重新生成失败')
+    }
+  } finally {
+    stopController = null
+    loading.value = false
+    item.status = ''
     scrollToBottom()
   }
 }
@@ -255,9 +427,15 @@ const handleSwitchMessage = async (item) => {
     if (res.code === 200) {
       const list = res.data || []
       messages.value = list.length
-        ? list.map((m) => ({ role: m.role, content: m.content }))
+        ? list.map((m) => ({
+            role: m.role,
+            content: m.content,
+            incomplete: !!m.incomplete,
+            steps: []
+          }))
         : [{ ...WELCOME }]
       threadId.value = item.thread_id
+      rememberThread()
       historyVisible.value = false
       scrollToBottom()
     }
@@ -278,6 +456,7 @@ const parseMarkdown = (text) => {
 onMounted(() => {
   getModels()
   getConversations()
+  restoreMessages()
 })
 </script>
 
@@ -286,6 +465,10 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.card-right {
+  display: flex;
+  gap: 4px;
 }
 .history-entry {
   cursor: pointer;
@@ -300,6 +483,30 @@ onMounted(() => {
 }
 .history-item:hover {
   color: #409eff;
+}
+.message-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+.operate-message {
+  font-size: 16px;
+  display: flex;
+  gap: 6px;
+}
+.operate-icon {
+  cursor: pointer;
+  color: #909399;
+}
+.operate-icon:hover {
+  color: #409eff;
+}
+.continue-message {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .search-box {
   border: 1px solid #e0e0e0;
