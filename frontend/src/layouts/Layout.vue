@@ -33,7 +33,7 @@
       </el-header>
       <el-container>
         <el-aside width="220px">
-          <el-menu router style="height: 100%" default-active="/manager/home">
+          <el-menu router style="height: 100%" default-active="$route.path">
             <el-menu-item index="/manager/home">
               <el-icon><icon-menu /></el-icon>
               <span>系统首页</span>
@@ -96,8 +96,8 @@ const handleLogout = () => {
 }
 
 const handleCommand = (command) => {
-  if (command === 'profile') {
-    router.push('/manager/profile')
+  if (command === 'prefile') {
+    router.push('/manager/prefile')
   } else if (command === 'password') {
     router.push('/manager/password')
   } else if (command === 'logout') {

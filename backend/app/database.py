@@ -3,6 +3,7 @@ from sqlalchemy import create_engine,DateTime
 from app.config import setting
 from datetime import datetime
 
+# 数据库连接入口
 engine = create_engine(setting.DATABASE_URL)
 
 

@@ -12,6 +12,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 def get_current_user(token:str = Depends(oauth2_scheme),db:Session = Depends(get_db)):
     """JWT TOKEN鉴权验证合法性"""
     try:
+        # 验证并解码token
         payload = decode_access_token(token)
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="登录失效，请重新登录")

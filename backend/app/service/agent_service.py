@@ -50,6 +50,17 @@ REGENERATE_HINTS = [
     "请重新回答上面这个问题，尽量更简洁，只保留结论和关键步骤。",
 ]
 
+SUMMARY_PROMPT = """根据下面的对话生成一个简短的中文标题。
+要求：
+1. 不超过 14 个字
+2. 不要引号、句号、书名号
+3. 概括主题，不要照抄问题
+4. 只输出标题本身，不要解释
+
+用户问题：{question}
+助手回答：{answer}
+"""
+
 # 工具英文名 → 页面上给人看的中文过程文案
 TOOL_LABELS = {
     "search_lab_docs": "检索实验室知识库",
@@ -103,7 +114,7 @@ def run_agent(db:Session,current_user:User,data:ChatRequest):
         raise BusinessException(message="请输入您要对话的内容")
 
     # 获取当前对话的线程id
-    thread_id = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
+    thread_id,_ = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
     agent = build_agent(db,current_user,data.model,data.enable_web)
 
     try:
@@ -120,6 +131,7 @@ def run_agent(db:Session,current_user:User,data:ChatRequest):
     messages = result.get("messages") or []
     if not messages:
         raise BusinessException(message="大模型没有返回内容")
+    # 从messages中从后往前取出内容
     for message in reversed(messages):
         if isinstance(message,AIMessage) and message.content.strip():
             content = message.content.strip()
@@ -174,6 +186,8 @@ async def stream_agent(db:Session,current_user:User,data:ChatRequest) -> AsyncIt
     """生成器：边跑agent边yield事件
     事件类型：status / tool_start / tool_end / token / done / error
     """
+    collected:list[str] = []
+    need_summary = False
     try:
         # history = _build_history(data)
         question = next(
@@ -184,27 +198,28 @@ async def stream_agent(db:Session,current_user:User,data:ChatRequest) -> AsyncIt
         if not question:
             raise BusinessException(message="请输入您要对话的内容")
         #拿到thread_id
-        thread_id = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
+        thread_id,need_summary = conversation_service.resolve_thread(db,current_user,data.thread_id,question)
 
         inputs = {"messages":[SystemMessage(content = SYSTEM_PROMPT,id="system"),HumanMessage(content=question)]}
         agent = build_agent(db,current_user,data.model,data.enable_web)
 
         yield{"type":"status","message":"正在思考..."}
 
+        # 翻译层，将框架的原始事件翻译为前端的业务事件
         async for event in agent.astream_events(
             inputs,
             version="v2",
             config={"configurable":{"thread_id":thread_id},"recursion_limit":10} # tool调用上限，防止空转
         ):
-            kind = event.get("event")
-            if kind == "on_tool_start":
+            kind = event.get("event") 
+            if kind == "on_tool_start": # 工具执行
                 name = event.get("name") or ""
                 yield{
                    "type":"tool_start",
                    "name":name,
                    "label":TOOL_LABELS.get(name,name) 
                 }
-            elif kind == "on_tool_end":
+            elif kind == "on_tool_end": # 工具结束
                 name = event.get("name") or ""
                 yield{
                     "type":"tool_end",
@@ -221,9 +236,21 @@ async def stream_agent(db:Session,current_user:User,data:ChatRequest) -> AsyncIt
                     continue
                 text = _chunk_text((event.get("data") or {}).get("chunk"))
                 if text:
+                    collected.append(text)
                     yield {"type": "token", "content": text}
                 # 正常跑完：不要在 done 里再带一份全文，前端已经用 token 拼好了
         yield {"type": "done"}
+
+        # 生成总结
+        if need_summary and collected:
+            title = await _make_summary(question,"".join(collected))
+            if title :
+                conversation_service.update_conversation_meta(db,thread_id,summary=title)
+                yield {
+                    "type":"conversation",
+                    "thread_id":thread_id,
+                    "summary":title
+                }
     except BusinessException as exc:
         yield {"type": "error", "message": exc.message}
     except Exception:
@@ -241,17 +268,22 @@ async def continue_stream_agent(db,current_user,data:ContinueRequest) -> AsyncIt
     history = messages[:idx+1] if idx >= 0 else []
     
     cfg  = _resolve_model(data.model)
+
+    # 创建LLM客户端
     llm = ChatOpenAI(api_key=cfg["api_key"],base_url=cfg["base_url"],model=cfg["model"],temperature=0,streaming=True)
 
     added = []
     async for chunk in llm.astream([*history,AIMessage(content=data.content),HumanMessage(content=CONTINUE_HINT)]):
+        # 将chunk转换为纯文本
         text = _chunk_text(chunk)
         if text:
             added.append(text)
             yield {"type":"token","content":text}
 
+    # 将重新生成的对话和模型对话进行拼接
     merged = data.content + " ".join(added)
     agent = build_agent(db,current_user,data.model)
+    # 更新数据图的检查点
     await agent.aupdate_state(
         config,
         {"messages":[AIMessage(content=merged,id=f"ai-{thread_id}")]},
@@ -317,14 +349,16 @@ async def regenerate_stream_agent(db,current_user,data:RegenerateRequest) -> Asy
 
 async def load_messages(thread_id:str) -> list:
     """读取会话的原始消息"""
+    # 读取历史对话的数据源
     tup = await _checkpointer.aget_tuple({"configurable":{"thread_id":thread_id}})
     if tup is None:
         return []
+    # 链式取嵌套字段的值
     return tup.checkpoint.get("channel_values",{}).get("messages",[])
 
 def to_chat_messages(messages:list) -> list:
     """过滤成展示文本"""
-    out = []
+    out = []  
     for m in messages:
         if not isinstance(m,(HumanMessage,AIMessage)):
             continue
@@ -347,16 +381,18 @@ async def init_checkpointer() -> None:
     global _checkpointer
     if _checkpointer is not None:
         return 
+    # 连接sqlite数据库
     conn  = await aiosqlite.connect(str(CHECKPOINT_PATH))
+    # 将数据的连接包装成checkpointer
     saver = AsyncSqliteSaver(conn)
-    await saver.setup()
-    _checkpointer = saver
+    await saver.setup() # 创建所需的表
+    _checkpointer = saver # 登记到全局
 
 async def close_checkpointer() -> None:
     """关闭时释放连接"""
     global _checkpointer
     if _checkpointer is not None:
-        await _checkpointer.conn.close()
+        await _checkpointer.conn.close() # 关闭连接
         _checkpointer = None
 
 def _resolve_model(model_id:str | None) -> dict:
@@ -373,3 +409,25 @@ def _resolve_model(model_id:str | None) -> dict:
     if not cfg["api_key"]:
         raise BusinessException(message=f"模型「{cfg['label']}」未配置 API Key")
     return cfg
+
+async def _make_summary(question: str, answer: str):
+    """生成标题 + 总结，失败返回 (None, None)"""
+    try:
+        cfg = _resolve_model(None)
+        llm = ChatOpenAI(
+            api_key=cfg["api_key"],
+            base_url=cfg["base_url"],
+            model=cfg["model"],
+            temperature=0.3,
+            max_tokens=96,
+        )
+        resp = await llm.ainvoke(SUMMARY_PROMPT.format(
+            question=question[:200],
+            answer=answer[:800],      # 截断，省 token
+        ))
+        summary = str(resp.content).strip().strip('“”"\'《》')
+        summary = " ".join(summary.split())[:20]
+        return summary or None
+    except Exception:
+        traceback.print_exc()
+        return None

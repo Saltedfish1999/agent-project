@@ -35,7 +35,10 @@ origins = [
 	"http://127.0.0.1:5173",
 ]
 
+# 在数据库中建立表
 Base.metadata.create_all(bind=engine)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:

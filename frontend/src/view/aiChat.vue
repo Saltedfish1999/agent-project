@@ -1,9 +1,17 @@
 <template>
-  <div>
+  <div class="ai-page">
     <el-card>
       <template #header>
         <div class="card-header" style="font-size: 16px; font-weight: bold">
-          <span>AI智能助手</span>
+          <div class="card-left">
+            <img src="../assets/images/bot-logo.png" alt="" />
+            <div class="card-contenxt">
+              <span>AI智能助手</span>
+              <span style="font-size: 14px; color: #333333; font-weight: 400"
+                >我是你的AI智能助手，可以帮你完成工作</span
+              >
+            </div>
+          </div>
           <div class="card-right">
             <el-icon class="history-entry" @click="addNewChat"><Plus /></el-icon>
             <el-icon class="history-entry" @click="openHistory"><Clock /></el-icon>
@@ -23,13 +31,19 @@
       >
         <div
           v-for="(item, index) in messages"
-          :key="index"
+          :key="item.uid"
           :style="{
             display: 'flex',
             justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start',
-            marginBottom: '12px'
+            marginBottom: '12px',
+            gap: '4px'
           }"
         >
+          <img
+            v-if="item.role === 'assistant'"
+            class="message-logo"
+            src="../assets/images/bot-logo.png"
+          />
           <div
             :style="{
               maxWidth: '70%',
@@ -74,6 +88,11 @@
               </div>
             </div>
           </div>
+          <img
+            v-if="item.role === 'user'"
+            class="message-logo"
+            src="../assets/images/user-logo.png"
+          />
         </div>
       </div>
 
@@ -109,7 +128,14 @@
         </div>
       </div>
     </el-card>
-    <el-drawer v-model="historyVisible" title="历史记录" direction="rtl" size="320px">
+    <ConversationHistory
+      v-if="historyVisible"
+      :active-id="threadId"
+      @select="handleSwitchMessage"
+      @close="historyVisible = false"
+      @add="addNewChat"
+    />
+    <!-- <el-drawer v-model="historyVisible" title="历史记录" direction="rtl" size="320px">
       <div v-loading="historyLoading">
         <div
           v-for="item in historyMessages"
@@ -121,7 +147,7 @@
           <div class="history-date">{{ item.update_time }}</div>
         </div>
       </div>
-    </el-drawer>
+    </el-drawer> -->
   </div>
 </template>
 
@@ -133,12 +159,14 @@ import {
   getConversationMessages,
   getModelApi,
   continueChatApi,
-  regenerateChatApi
+  regenerateChatApi,
+  deleteConversationMessages
 } from '@/api/ai'
 import { ref, reactive, nextTick, onMounted, computed } from 'vue'
 import { marked } from 'marked'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import DOMPurify from 'dompurify'
+import ConversationHistory from '@/view/historyMessageList.vue'
 
 defineOptions({ name: 'AiChat' })
 const WELCOME = {
@@ -155,8 +183,6 @@ const input = ref('')
 const loading = ref(false)
 const listRef = ref()
 const historyVisible = ref(false)
-const historyMessages = ref([])
-const historyLoading = ref(false)
 const models = ref([])
 const currentModel = ref('')
 const enable_web = ref(false)
@@ -218,20 +244,6 @@ const isWebSearch = () => {
 }
 
 const handleStop = () => stopController?.abort()
-
-// 获取对话历史
-const getConversations = async () => {
-  historyLoading.value = true
-  const res = await getConversation({ page: 1, page_size: 10 })
-  try {
-    if (res.code === 200) {
-      const { data } = res
-      historyMessages.value = data.list
-    }
-  } finally {
-    historyLoading.value = false
-  }
-}
 
 // 重新生成
 const handleContinue = async () => {
@@ -455,16 +467,31 @@ const parseMarkdown = (text) => {
 
 onMounted(() => {
   getModels()
-  getConversations()
   restoreMessages()
 })
 </script>
 
 <style scoped>
+.ai-page {
+  position: relative;
+  height: calc(100vh - 100px);
+}
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.card-left {
+  display: flex;
+  gap: 4px;
+}
+.card-left img {
+  width: 42px;
+  height: 42px;
+}
+.card-contenxt {
+  display: flex;
+  flex-direction: column;
 }
 .card-right {
   display: flex;
@@ -488,12 +515,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 6px;
 }
 .operate-message {
   font-size: 16px;
   display: flex;
   gap: 6px;
+  margin-top: 4px;
+}
+.message-logo {
+  width: 32px;
+  height: 32px;
 }
 .operate-icon {
   cursor: pointer;

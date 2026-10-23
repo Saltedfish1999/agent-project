@@ -26,6 +26,23 @@ export function getConversationMessages(threadId) {
   })
 }
 
+// 删除历史信息
+export function deleteConversationMessages(threadId) {
+  return request({
+    url: `/api/ai/conversations/${threadId}`,
+    method: 'delete'
+  })
+}
+
+// 历史信息重命名
+export function renameMessages(threadId, summary) {
+  return request({
+    url: `/api/ai/conversations/${threadId}/rename`,
+    method: 'put',
+    params: { summary }
+  })
+}
+
 // 加载可选大模型
 export function getModelApi() {
   return request({ url: '/api/ai/models', method: 'get' })

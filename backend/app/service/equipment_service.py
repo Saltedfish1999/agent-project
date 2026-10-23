@@ -26,14 +26,14 @@ def get_equipment_page_list(
         query = query.fiter(Equipment.name.ilike(f"%{keywords}%"))
     total = query.count()
     items = (
-        query.order_by(Equipment.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        query.order_by(Equipment.id.desc()) # 按照id降序排序
+        .offset((page - 1) * page_size) # 跳过前面的数据
+        .limit(page_size) # 最多取多少条数据
         .all()
     )
     result = []
     for item in items:
-        res = EquipmentResponse.model_validate(item)
+        res = EquipmentResponse.model_validate(item) # 将数据库对象转换为响应对象
         res.lab_name = item.lab.name if item.lab else None
         result.append(res)
     return pageResponse(list=result,total=total)
@@ -43,7 +43,7 @@ def create_equipment(db: Session, data: EquipmentCreateRequest):
     exist = db.query(Equipment).filter(Equipment.name == data.name).first()
     if exist:
         raise BusinessException(message="实验室设备已存在")
-    equipment = Equipment(**data.model_dump())
+    equipment = Equipment(**data.model_dump()) # 将校验过的数据转为ORM对象
     db.add(equipment)
     db.commit()
     db.refresh(equipment)
@@ -75,6 +75,7 @@ def update_equipment(db: Session, equipment_id: int, data: EquipmentUpdateReques
         raise BusinessException(message="同一个实验室不能存在同名的设备")
 
     for filed, value in payload.items():
+        # 按照字典动态给对象复制，逐个写到ORM对象
         setattr(equipment, filed, value)
 
     db.commit()

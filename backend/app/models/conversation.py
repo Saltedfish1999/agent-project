@@ -19,3 +19,7 @@ class Conversation(Base):
     title:Mapped[str] = mapped_column(
         String(60),comment="会话标题",nullable=True
     )
+
+    summary:Mapped[str] = mapped_column(
+        String(200),comment="会话总结",nullable=True
+    )

@@ -9,6 +9,7 @@ from app.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.schemas.ai import ChatMessage, ChatRequest, ContinueRequest, RegenerateRequest
+from app.schemas.conversation import ConversationResponse
 from app.service import agent_service, ai_service, conversation_service
 
 router = APIRouter(prefix="/api/ai",tags=["agent"])
@@ -44,9 +45,10 @@ def list_conversations(
     page:int=1,
     page_size:int=10,
     current_user:User = Depends(get_current_user),
+    keyword: str | None = None,
     db:Session = Depends(get_db)
 ):
-    res = conversation_service.get_conversation_list(db,current_user,page,page_size)
+    res = conversation_service.get_conversation_list(db,current_user,page,page_size,keyword)
     return Response.success(data=res)
 
 @router.get("/conversation/{thread_id}/messages")
@@ -68,6 +70,11 @@ async def delete_conversation(
     conversation_service.delete_conversation(db,current_user,thread_id)
     await agent_service.delete_thread(thread_id)
     return Response.success()
+
+@router.put("/conversations/{thread_id}/rename")
+def rename_conversation(thread_id:str,db:Session = Depends(get_db),summary:str|None = None,current_user:User = Depends(get_current_user)):
+    conv = conversation_service.rename_conversation_title(db,current_user,thread_id,summary)
+    return Response.success(data=ConversationResponse.model_validate(conv))
 
 @router.get("/models")
 def list_models():

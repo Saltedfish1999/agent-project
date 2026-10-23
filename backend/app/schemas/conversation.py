@@ -7,6 +7,7 @@ class ConversationResponse(BaseModel):
     """对话列表"""
     thread_id:str
     title:str | None = None
+    summary:str| None = None
     create_time: datetime | None = None
     update_time: datetime | None = None
 
